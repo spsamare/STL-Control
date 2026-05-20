@@ -1,0 +1,10 @@
+# Core numerical tools for later control examples and solver adapters.
+numpy>=1.26
+scipy>=1.11
+
+# Open-source MILP modeling path for the next implementation step.
+pyomo>=6.7
+highspy>=1.7
+
+# Testing and diagnostics.
+pytest>=8.0
