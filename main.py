@@ -129,6 +129,7 @@ def run_plant_visualization_demo():
         big_m=config.STL_BIG_M,
         norm_type=config.STL_NORM_TYPE,
         solver=config.STL_SOLVER,
+        ignore_robust=config.STL_ROBUST_IGNORE
     )
     sensing_schedule = []
     estimated_state_history = []
@@ -142,8 +143,10 @@ def run_plant_visualization_demo():
     print("Initial state:", plant.get_state())
     print("Sensing age limit:", sensing_policy.age_limit)
 
+    change_time = config.SIMULATION_STEPS
     for time_index in range(config.SIMULATION_STEPS):
         if time_index in config.NOISE_CHANGES:
+            change_time = time_index
             change = config.NOISE_CHANGES[time_index]
             if "process_noise" in change or "process_noise_variance" in change:
                 sigma = change.get("process_noise_variance", sigma)
@@ -151,7 +154,7 @@ def run_plant_visualization_demo():
                     change.get("process_noise", config.PROCESS_NOISE),
                     variance=sigma,
                 )
-                sensing_policy.set_sigma(sigma)
+                # sensing_policy.set_sigma(sigma)
             stl_config = STLResilienceConfig(
                 delta=stl_config.delta,
                 alpha=stl_config.alpha,
@@ -161,7 +164,9 @@ def run_plant_visualization_demo():
                 big_m=stl_config.big_m,
                 norm_type=stl_config.norm_type,
                 solver=stl_config.solver,
+                ignore_robust=stl_config.ignore_robust
             )
+            """
             if "observation_noise" in change or "observation_noise_variance" in change:
                 plant.set_observation_noise(
                     change.get("observation_noise", config.OBSERVATION_NOISE),
@@ -170,6 +175,32 @@ def run_plant_visualization_demo():
                         config.OBSERVATION_NOISE_VARIANCE,
                     ),
                 )
+            """
+            print(f"  Changed noise model at step {time_index}")
+
+        if time_index == change_time + 10:
+            sensing_policy.set_sigma(sigma)
+            stl_config = STLResilienceConfig(
+                delta=stl_config.delta,
+                alpha=stl_config.alpha,
+                beta=stl_config.beta,
+                epsilon=stl_config.epsilon,
+                process_noise_variance=sigma,
+                big_m=stl_config.big_m,
+                norm_type=stl_config.norm_type,
+                solver=stl_config.solver,
+                ignore_robust=stl_config.ignore_robust
+            )
+            """
+            if "observation_noise" in change or "observation_noise_variance" in change:
+                plant.set_observation_noise(
+                    change.get("observation_noise", config.OBSERVATION_NOISE),
+                    variance=change.get(
+                        "observation_noise_variance",
+                        config.OBSERVATION_NOISE_VARIANCE,
+                    ),
+                )
+            """
             print(f"  Changed noise model at step {time_index}")
 
         sensing_decision = sensing_policy.decide()
@@ -179,7 +210,9 @@ def run_plant_visualization_demo():
             sensing_decision=sensing_decision,
             target_state=config.TARGET_STATE,
             control_coefficient_matrix=config.CONTROL_COEFFICIENT_MATRIX,
+            state_coefficient_matrix=config.STATE_REPORTING_MATRIX,
             tx_power=config.TX_POWER,
+            horizon=config.PLANNING_HORIZON,
             stl_config=stl_config,
             a=plant.config.a,
             b=plant.config.b,

@@ -137,6 +137,7 @@ class STLResilienceConfig:
     big_m: float = 1_000.0
     norm_type: str = "infinity"
     solver: str = "SCIP"
+    ignore_robust: bool = False
 
 
 @dataclass(frozen=True)
@@ -161,7 +162,9 @@ def solve_control_decision(
     sensing_decision,
     target_state,
     control_coefficient_matrix,
+    state_coefficient_matrix,
     tx_power,
+    horizon,
     stl_config,
     a,
     b,
@@ -178,12 +181,13 @@ def solve_control_decision(
     """
 
     if sensing_decision.sense:
-        horizon = max(1, int(np.floor(sensing_decision.age_limit)))
+        horizon = max(1, max(int(np.floor(sensing_decision.age_limit)), horizon))
         plan = build_control_plan(
             start_time=sensing_decision.time_index,
             observed_state=observed_state,
             target_state=target_state,
             control_coefficient_matrix=control_coefficient_matrix,
+            state_coefficient_matrix=state_coefficient_matrix,
             tx_power=tx_power,
             stl_config=stl_config,
             a=a,
@@ -223,6 +227,7 @@ def build_control_plan(
     observed_state,
     target_state,
     control_coefficient_matrix,
+    state_coefficient_matrix,
     tx_power,
     stl_config,
     a,
@@ -243,6 +248,7 @@ def build_control_plan(
     observed_state = np.asarray(observed_state, dtype=float).reshape(-1)
     target_state = np.asarray(target_state, dtype=float).reshape(-1)
     r = np.asarray(control_coefficient_matrix, dtype=float)
+    q = np.asarray(state_coefficient_matrix, dtype=float)
 
     validate_control_problem(
         a,
@@ -250,6 +256,7 @@ def build_control_plan(
         observed_state,
         target_state,
         r,
+        q,
         tx_power,
         stl_config,
         horizon,
@@ -272,6 +279,7 @@ def build_control_plan(
         horizon,
         stl_config.epsilon,
         stl_config.norm_type,
+        stl_config.ignore_robust
     )
     constraints = [states[0] == observed_state]
     if control_lower_bound is not None:
@@ -303,6 +311,7 @@ def build_control_plan(
 
     objective = cp.Minimize(
         cp.sum([cp.quad_form(controls[k], r) for k in range(horizon)])
+        + cp.sum([cp.quad_form(states[k] - target_state, q) for k in range(horizon + 1)])
         + float(tx_power)
     )
     problem = cp.Problem(objective, constraints)
@@ -332,7 +341,7 @@ def quadratic_control_cost(controls, coefficient_matrix):
     return sum(float(control.T @ coefficient_matrix @ control) for control in controls)
 
 
-def robust_state_margins(a, process_noise_variance, horizon, epsilon, norm_type):
+def robust_state_margins(a, process_noise_variance, horizon, epsilon, norm_type, ignor_margins):
     """Moment-based chance tightening with epsilon shared across the horizon.
 
     A union-bound allocation of epsilon / horizon is used for each encoded
@@ -342,19 +351,23 @@ def robust_state_margins(a, process_noise_variance, horizon, epsilon, norm_type)
 
     state_dim = a.shape[0]
     covariance = noise_covariance(process_noise_variance, state_dim)
-    predicted_covariance = np.zeros((state_dim, state_dim))
-    per_step_epsilon = epsilon / horizon
+    predicted_covariance = covariance.copy()  # np.zeros((state_dim, state_dim))
+    per_step_epsilon = 1 # epsilon  # epsilon / horizon
     margins = []
     for _ in range(horizon):
-        predicted_covariance = a @ predicted_covariance @ a.T + covariance
-        if norm_type == "l2":
-            margins.append(np.sqrt(np.trace(predicted_covariance) / per_step_epsilon))
-        elif norm_type == "infinity":
-            margins.append(
-                np.sqrt(state_dim * np.diag(predicted_covariance) / per_step_epsilon)
-            )
+        if ignor_margins is True:
+            margins.append([process_noise_variance*(_+1)])  # margins.append([0])
         else:
-            raise ValueError("norm_type must be 'l2' or 'infinity'.")
+            # predicted_covariance = a @ predicted_covariance @ a.T + covariance
+            predicted_covariance = a @ predicted_covariance @ a.T
+            if norm_type == "l2":
+                margins.append(np.sqrt(np.trace(predicted_covariance) / per_step_epsilon))
+            elif norm_type == "infinity":
+                margins.append(
+                    np.sqrt(state_dim * np.diag(predicted_covariance) / per_step_epsilon)
+                )
+            else:
+                raise ValueError("norm_type must be 'l2' or 'infinity'.")
     return np.asarray(margins)
 
 
@@ -366,7 +379,7 @@ def robust_predicate_constraints(state, target_state, z_phi, margin, config):
         return [cp.norm(state - target_state, 2) + float(margin) <= relaxed_radius]
 
     return [
-        cp.abs(state[j] - target_state[j]) + float(margin[j]) <= relaxed_radius
+        cp.abs(state[j] - target_state[j]) + float(margin[j]) * z_phi <= relaxed_radius  # check here
         for j in range(len(target_state))
     ]
 
@@ -431,7 +444,7 @@ def noise_covariance(variance, state_dim):
     return variance
 
 
-def validate_control_problem(a, b, observed_state, target_state, r, tx_power, config, horizon):
+def validate_control_problem(a, b, observed_state, target_state, r, q, tx_power, config, horizon):
     if a.ndim != 2 or a.shape[0] != a.shape[1]:
         raise ValueError("a must be a square state-transition matrix.")
     if b.ndim != 2 or b.shape[0] != a.shape[0]:
@@ -440,6 +453,8 @@ def validate_control_problem(a, b, observed_state, target_state, r, tx_power, co
         raise ValueError("observed_state and target_state must match the state size.")
     if r.shape != (b.shape[1], b.shape[1]):
         raise ValueError("control_coefficient_matrix must match the control size.")
+    if q.shape != (a.shape[1], a.shape[1]):
+        raise ValueError("state_coefficient_matrix must match the control size.")
     if float(tx_power) < 0:
         raise ValueError("tx_power must be non-negative.")
     if config.delta <= 0:
